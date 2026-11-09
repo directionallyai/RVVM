@@ -1,0 +1,95 @@
+name: Native headless builds
+
+# Static (or, on macOS, system-libraries-only) headless rvvm binaries without any GUI backend (no X11, Wayland, SDL),
+# built natively on each platform and boot-tested with a tiny Linux guest, both with the JIT and with -nojit.
+on:
+  push:
+    branches: [native-headless-ci]
+    paths: ['.github/workflows/native-headless.yml', 'ci/**']
+  workflow_dispatch:
+
+env:
+  HEADLESS: USE_GUI=0 USE_X11=0 USE_WAYLAND=0 USE_SDL=0 USE_NO_DLIB=1 USE_LIB=0
+
+jobs:
+  guest:
+    name: Smoke guest (OpenSBI + Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: smoke-guest-out
+          key: smoke-guest-${{ hashFiles('ci/smoke-guest/**') }}
+      - name: Build
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends gcc-riscv64-linux-gnu libc6-dev-riscv64-cross flex bison bc libssl-dev libelf-dev
+          sh ci/smoke-guest/build.sh "$PWD/smoke-guest-out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smoke-guest
+          path: smoke-guest-out
+          retention-days: 5
+
+  build:
+    name: ${{ matrix.name }}
+    needs: guest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+            make: make LDFLAGS=-static
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            make: make LDFLAGS=-static
+          - name: macos-arm64
+            runner: macos-26
+            make: make CFLAGS="-target arm64-apple-macos11" USE_COCOA_GUI=0
+          - name: macos-x86_64
+            runner: macos-26-intel
+            make: make CFLAGS="-target x86_64-apple-macos10.13" USE_COCOA_GUI=0
+          - name: windows-x86_64
+            runner: windows-2022
+            make: make LDFLAGS=-static USE_WIN32_GUI=0
+            msys: true
+    defaults:
+      run:
+        shell: ${{ matrix.msys && 'msys2 {0}' || 'bash' }}
+    steps:
+      - uses: msys2/setup-msys2@v2
+        if: matrix.msys
+        with:
+          msystem: UCRT64
+          install: make python mingw-w64-ucrt-x86_64-gcc
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: smoke-guest
+          path: smoke-guest
+      - name: Build
+        run: ${{ matrix.make }} ${{ env.HEADLESS }} BUILDDIR=build
+      - name: Binary
+        run: |
+          ls -l build
+          case "${{ matrix.name }}" in
+            linux-*) file build/rvvm_*; if ldd build/rvvm_x86_64 build/rvvm_arm64 2>/dev/null | grep -q '=>'; then echo 'dynamic libraries found'; exit 1; fi ;;
+            macos-*) file build/rvvm_*; otool -L build/rvvm_* ;;
+            windows-*) ls -l build/*.exe ;;
+          esac
+      - name: Smoke boot (JIT)
+        run: python3 ci/smoke_run.py "build/$(ls build | grep -E '^rvvm_(x86_64|arm64)(\.exe)?$' | head -1)" smoke-guest
+      - name: Smoke boot (-nojit)
+        run: python3 ci/smoke_run.py "build/$(ls build | grep -E '^rvvm_(x86_64|arm64)(\.exe)?$' | head -1)" smoke-guest -nojit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rvvm-${{ matrix.name }}
+          path: |
+            build/rvvm_*
+            !build/*/
+          retention-days: 30
