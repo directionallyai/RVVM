@@ -191,6 +191,7 @@ static void rvvm_print_help(void)
         "    -netmux          Console and guest TCP over framed stdin/stdout, no host sockets\n"
         "    -vfio_pci   ...  PCI passthrough via VFIO (Example: 00:02.0), needs root\n"
         "    -nvme       ...  Explicitly attach storage image as NVMe device\n"
+        "    -ro              Attach the -i/-nvme image read-only (the guest cannot change the file)\n"
         "    -ata        ...  Explicitly attach storage image as ATA (IDE) device\n"
         "    -nogui           Disable display GUI\n"
         "    -nogpu           Disable GPU\n"
@@ -237,7 +238,11 @@ static bool rvvm_cli_configure(rvvm_machine_t* machine, const char* bios, tap_de
     while ((arg_name = rvvm_next_arg(&arg_val, &arg_iter))) {
         if (arg_val) {
             if (rvvm_strcmp(arg_name, "i") || rvvm_strcmp(arg_name, "image") || rvvm_strcmp(arg_name, "nvme")) {
-                if (!rvvm_nvme_init_auto(machine, arg_val)) {
+                // With -ro the guest cannot modify the image file, whatever it does to the drive
+                rvvm_pci_func_t* nvme = rvvm_has_arg("ro")
+                                      ? rvvm_nvme_init(machine, rvvm_blk_open(arg_val, NULL, RVVM_BLK_READ), RVVM_PCI_ADDR_ANY)
+                                      : rvvm_nvme_init_auto(machine, arg_val);
+                if (!nvme) {
                     rvvm_error("Failed to attach image \"%s\"", arg_val);
                     return false;
                 }
