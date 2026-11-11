@@ -138,6 +138,12 @@ struct tap_dev {
     thread_ctx_t* thread;
     net_sock_t*   shut[2];
     tap_mux_t*    mux; // If set, guest connections go through it instead of host sockets
+    struct {
+        uint32_t id;       // 0 = free slot
+        uint16_t src_port; // Guest port that asked
+        uint8_t  dst_ip[PLEN_IPv4]; // Resolver address the guest asked
+    } dns[16];             // Guest DNS queries the embedder has not answered yet
+    uint32_t      dns_next;
     uint8_t       mac[6];
 
     bool          filt_lan;
@@ -295,6 +301,7 @@ static void emulate_icmp(tap_dev_t* tap, const uint8_t* buffer, size_t size, net
 static void handle_icmp(tap_dev_t* tap, const uint8_t* buffer, size_t size, net_addr_t* dst, net_addr_t* src)
 {
     static bool icmp_sock_available = true;
+    if (tap->mux) return; // No host ICMP sockets with -netmux
     if (size >= ICMP_HDR_SIZE && size < 1460 && read_uint16_be_m(buffer) == ICMP_ECHO_REQ) {
         uint16_t icmp_id = read_uint16_be_m(buffer+4);
         if (likely(icmp_sock_available)) {
@@ -457,6 +464,26 @@ static void handle_udp(tap_dev_t* tap, const uint8_t* buffer, size_t size, net_a
     if (src->type == NET_TYPE_IPV4 && src->port == 68 && dst->port == 67
         && (memcmp(dst->ip, GATEWAY_IP, PLEN_IPv4) == 0 || read_uint32_be_m(dst->ip) == 0xFFFFFFFF)) {
         handle_dhcp(tap, udb_buff, udp_size, src);
+        return;
+    }
+
+    // With -netmux the embedder is the guest's only way out: no UDP reaches host sockets. DNS queries
+    // (any resolver address, port 53) go to the embedder, which answers or stays silent.
+    if (tap->mux) {
+        if (dst->port == 53 && src->type == NET_TYPE_IPV4 && udp_size > 0 && udp_size <= 1472) {
+            uint32_t id = 0;
+            spin_lock(&tap->lock);
+            for (size_t i = 0; i < 16 && !id; ++i) {
+                size_t slot = (tap->dns_next + i) % 16;
+                if (tap->dns[slot].id) continue;
+                id = ++tap->dns_next ? tap->dns_next : ++tap->dns_next; // Never 0
+                tap->dns[slot].id = id;
+                tap->dns[slot].src_port = src->port;
+                memcpy(tap->dns[slot].dst_ip, dst->ip, PLEN_IPv4);
+            }
+            spin_unlock(&tap->lock);
+            if (id) tap_mux_dns_query(tap->mux, id, udb_buff, udp_size);
+        }
         return;
     }
 
@@ -1030,6 +1057,32 @@ bool tap_user_inbound(tap_dev_t* tap, net_sock_t* sock, uint16_t guest_port)
     tap_tcp_inbound(tap, sock, &guest);
     spin_unlock(&tap->lock);
     return true;
+}
+
+void tap_user_dns_reply(tap_dev_t* tap, uint32_t id, const uint8_t* data, size_t size)
+{
+    uint8_t  dst_ip[PLEN_IPv4];
+    uint16_t src_port = 0;
+    spin_lock(&tap->lock);
+    for (size_t i = 0; i < 16; ++i) {
+        if (tap->dns[i].id == id) {
+            src_port = tap->dns[i].src_port;
+            memcpy(dst_ip, tap->dns[i].dst_ip, PLEN_IPv4);
+            tap->dns[i].id = 0;
+            break;
+        }
+    }
+    spin_unlock(&tap->lock);
+    if (!src_port || !size || size > 1472) return; // Unknown id, or nothing to say
+
+    uint8_t buffer[TAP_FRAME_SIZE];
+    size_t offset = ETH2_HDR_SIZE + IPv4_HDR_SIZE + UDP_HDR_SIZE;
+    memcpy(buffer + offset, data, size);
+    uint8_t* ipv4 = create_eth_frame(tap, buffer, ETH2_IPv4);
+    uint8_t* udp  = create_ipv4_frame(ipv4, size + UDP_HDR_SIZE, IP_PROTO_UDP, CLIENT_IP, dst_ip);
+    create_udp_datagram(udp, size, src_port, 53);
+    udp_ipv4_checksum(ipv4, size);
+    eth_send(tap, buffer, size + UDP_HDR_SIZE + IPv4_HDR_SIZE + ETH2_HDR_SIZE);
 }
 
 void tap_user_set_mux(tap_dev_t* tap, tap_mux_t* mux)

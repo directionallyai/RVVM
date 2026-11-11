@@ -34,8 +34,11 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
  *   type 6 FIN       both ways     the sender will send no more DATA (half close).
  *   type 7 RESET     both ways     abort the stream (refuse an OPEN_OUT, or a connection that failed).
  *
+ *   type 8 DNS_Q     vm->embedder  id: a query handle; payload: the guest's raw DNS query (UDP port 53, any resolver address).
+ *   type 9 DNS_R     embedder->vm  id: that handle; payload: the raw DNS reply. No reply, or an unknown id, is dropped.
+ *
  * Each direction of each stream (not the console) starts with 65536 bytes of credit.
- * All integers are big-endian. IPv6 and UDP are not carried: UDP (DNS) keeps using host sockets.
+ * All integers are big-endian. IPv6 and UDP are not carried, and guest UDP (DNS included) and ICMP are dropped, so no guest traffic reaches host sockets.
  */
 
 typedef struct tap_mux tap_mux_t;
@@ -55,6 +58,12 @@ net_sock_t* tap_mux_open_out(tap_mux_t* mux, const net_addr_t* dst);
 
 // mux -> tap_user.c: a stream was opened into the guest. `sock` is the guest-facing end.
 bool tap_user_inbound(tap_dev_t* tap, net_sock_t* sock, uint16_t guest_port);
+
+// tap_user.c -> mux: send the guest's DNS query `id` to the embedder
+void tap_mux_dns_query(tap_mux_t* mux, uint32_t id, const uint8_t* data, size_t size);
+
+// mux -> tap_user.c: the embedder answered DNS query `id`
+void tap_user_dns_reply(tap_dev_t* tap, uint32_t id, const uint8_t* data, size_t size);
 
 // tap_user.c: the mux that serves this interface
 void tap_user_set_mux(tap_dev_t* tap, tap_mux_t* mux);

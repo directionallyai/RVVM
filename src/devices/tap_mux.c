@@ -40,6 +40,8 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #define MUX_CREDIT   5
 #define MUX_FIN      6
 #define MUX_RESET    7
+#define MUX_DNS_Q    8
+#define MUX_DNS_R    9
 
 typedef struct mux_stream {
     struct mux_stream* next;
@@ -466,6 +468,7 @@ static void* mux_reader_thread(void* arg)
             case MUX_CREDIT:  mux_handle_credit(mux, id, payload, plen); break;
             case MUX_FIN:     mux_handle_fin(mux, id); break;
             case MUX_RESET:   mux_handle_reset(mux, id); break;
+            case MUX_DNS_R:   if (mux->tap) tap_user_dns_reply(mux->tap, id, payload, plen); break;
             default:          break; // Unknown types are ignored
         }
     }
@@ -609,4 +612,9 @@ net_sock_t* tap_mux_open_out(tap_mux_t* mux, const net_addr_t* dst)
     write_uint16_be_m(payload + 5, dst->port);
     mux_send(mux, MUX_OPEN_OUT, id, payload, sizeof(payload));
     return pair[0];
+}
+
+void tap_mux_dns_query(tap_mux_t* mux, uint32_t id, const uint8_t* data, size_t size)
+{
+    mux_send(mux, MUX_DNS_Q, id, data, size);
 }
