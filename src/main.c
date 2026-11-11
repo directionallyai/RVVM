@@ -38,6 +38,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <devices/i2c-oc.h>
 #include <devices/ns16550a.h>
 #include <devices/rtl8169.h>
+#include <devices/tap_mux.h>
 #include <devices/sound-hda.h>
 
 #include <devices/tap_api.h>
@@ -187,6 +188,7 @@ static void rvvm_print_help(void)
         "    -res 1280x720    Set display(s) resolution\n"
         "    -poweroff_key    Send HID_KEY_POWER instead of exiting on GUI close\n"
         "    -portfwd 8080=80 Port forwarding (Extended: tcp/127.0.0.1:8080=80)\n"
+        "    -netmux          Console and guest TCP over framed stdin/stdout, no host sockets\n"
         "    -vfio_pci   ...  PCI passthrough via VFIO (Example: 00:02.0), needs root\n"
         "    -nvme       ...  Explicitly attach storage image as NVMe device\n"
         "    -ata        ...  Explicitly attach storage image as ATA (IDE) device\n"
@@ -339,7 +341,15 @@ static int rvvm_cli_main(int argc, char** argv)
         gdbstub_init(machine, rvvm_getarg("gdbstub"));
     }
 
-    if (!rvvm_has_arg("serial")) {
+    tap_mux_t* mux = NULL;
+#ifdef USE_NET
+    if (rvvm_has_arg("netmux")) {
+        // stdin/stdout become the control channel; the console is stream 0 of it
+        mux = tap_mux_create();
+        ns16550a_init_auto(machine, tap_mux_console(mux));
+    }
+#endif
+    if (!mux && !rvvm_has_arg("serial")) {
         ns16550a_init_term_auto(machine);
     }
 
@@ -373,6 +383,14 @@ static int rvvm_cli_main(int argc, char** argv)
     if (!rvvm_has_arg("nonet")) {
         tap = tap_open();
         rvvm_rtl8169_init(machine, tap, RVVM_PCI_ADDR_ANY);
+    }
+#endif
+
+#ifdef USE_NET
+    if (mux && !tap_mux_start(mux, tap)) {
+        rvvm_error("Failed to start the -netmux control channel");
+        rvvm_free_machine(machine);
+        return -1;
     }
 #endif
 

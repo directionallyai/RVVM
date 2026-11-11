@@ -4,8 +4,8 @@ name: Native headless builds
 # built natively on each platform and boot-tested with a tiny Linux guest, both with the JIT and with -nojit.
 on:
   push:
-    branches: [native-headless-ci]
-    paths: ['.github/workflows/native-headless.yml', 'ci/**']
+    branches: [native-headless-ci, net-mux]
+    paths: ['.github/workflows/native-headless.yml', 'ci/**', 'src/**']
   workflow_dispatch:
 
 env:

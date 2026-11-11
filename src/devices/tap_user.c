@@ -10,6 +10,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 */
 
 #include "tap_api.h"
+#include "tap_mux.h"
 #include "networking.h"
 #include "threading.h"
 #include "spinlock.h"
@@ -136,6 +137,7 @@ struct tap_dev {
     ts_vec_t      tcp_listeners;
     thread_ctx_t* thread;
     net_sock_t*   shut[2];
+    tap_mux_t*    mux; // If set, guest connections go through it instead of host sockets
     uint8_t       mac[6];
 
     bool          filt_lan;
@@ -722,7 +724,7 @@ static void handle_tcp(tap_dev_t* tap, const uint8_t* buffer, size_t size, net_a
         }
     } else if (flags == TCP_FLAG_SYN) {
         // Initiate new async connection
-        net_sock_t* sock = net_tcp_connect(dst, NULL, false);
+        net_sock_t* sock = tap->mux ? tap_mux_open_out(tap->mux, dst) : net_tcp_connect(dst, NULL, false);
         if (sock) {
             ts = safe_new_obj(tap_sock_t);
             ts->sock = sock;
@@ -996,22 +998,45 @@ static void tap_tcp_recv(tap_dev_t* tap, tap_sock_t* ts)
     }
 }
 
+// Start an inbound connection to the guest on an already connected host-side socket
+static void tap_tcp_inbound(tap_dev_t* tap, net_sock_t* sock, const net_addr_t* guest_addr)
+{
+    tap_addr_convert(net_sock_addr(sock));
+    tap_sock_t* ts = safe_new_obj(tap_sock_t);
+    ts->sock = sock;
+    ts->addr = *guest_addr;
+    ts->tcp = safe_new_obj(tcp_ctx_t);
+    rvvm_randombytes(&ts->tcp->seq, sizeof(ts->tcp->seq));
+    ts->tcp->seq_ack = ts->tcp->seq - 1;
+    ts->tcp->state = TCP_STATE_RECV_OPEN;
+
+    tap_tcp_register(tap, ts);
+    tap_tcp_segment(tap, ts, TCP_FLAG_SYN);
+}
+
 static void tap_tcp_accept(tap_dev_t* tap, tap_sock_t* listener)
 {
     net_sock_t* sock = net_tcp_accept(listener->sock);
-    if (sock) {
-        tap_addr_convert(net_sock_addr(sock));
-        tap_sock_t* ts = safe_new_obj(tap_sock_t);
-        ts->sock = sock;
-        ts->addr = listener->addr;
-        ts->tcp = safe_new_obj(tcp_ctx_t);
-        rvvm_randombytes(&ts->tcp->seq, sizeof(ts->tcp->seq));
-        ts->tcp->seq_ack = ts->tcp->seq - 1;
-        ts->tcp->state = TCP_STATE_RECV_OPEN;
+    if (sock) tap_tcp_inbound(tap, sock, &listener->addr);
+}
 
-        tap_tcp_register(tap, ts);
-        tap_tcp_segment(tap, ts, TCP_FLAG_SYN);
-    }
+bool tap_user_inbound(tap_dev_t* tap, net_sock_t* sock, uint16_t guest_port)
+{
+    net_addr_t guest = {0};
+    guest.type = NET_TYPE_IPV4;
+    memcpy(guest.ip, CLIENT_IP, PLEN_IPv4);
+    guest.port = guest_port;
+    spin_lock(&tap->lock);
+    tap_tcp_inbound(tap, sock, &guest);
+    spin_unlock(&tap->lock);
+    return true;
+}
+
+void tap_user_set_mux(tap_dev_t* tap, tap_mux_t* mux)
+{
+    spin_lock(&tap->lock);
+    tap->mux = mux;
+    spin_unlock(&tap->lock);
 }
 
 static void tap_tcp_periodic(tap_dev_t* tap, tap_sock_t* ts)
@@ -1048,6 +1073,14 @@ static void tap_tcp_periodic(tap_dev_t* tap, tap_sock_t* ts)
         tcp_segment_t* seg = tcp->head;
         uint32_t seq = tcp->seq_ack;
         while (seg && seq - tcp->seq_ack < tcp->window) {
+            // The stored frame carries the ACK number from when it was first built. If the guest has sent
+            // a window's worth of data since, a Linux guest sees that ACK as too old (RFC 5961, blind
+            // data injection protection), drops the segment and answers with a challenge ACK forever.
+            // Refresh the ACK number and checksum before resending.
+            uint8_t* ipv4 = tcp_seg_buffer(seg) + ETH2_HDR_SIZE;
+            write_uint32_be_m(ipv4 + IPv4_HDR_SIZE + 8, tcp->ack);
+            write_uint16_be_m(ipv4 + IPv4_HDR_SIZE + 16, 0);
+            tcp_ipv4_checksum(ipv4, seg->size);
             eth_send(tap, tcp_seg_buffer(seg), seg->size + TCP_WRAP_SIZE);
             seq += seg->size;
             seg = seg->next;
