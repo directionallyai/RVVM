@@ -6,6 +6,8 @@ on:
   push:
     branches: [native-headless-ci, net-mux]
     paths: ['.github/workflows/native-headless.yml', 'ci/**', 'src/**']
+    # Pushing a tag rvvm-<anything> builds, smoke-boots and then publishes a release of that commit (see `release`).
+    tags: ['rvvm-*']
   workflow_dispatch:
 
 env:
@@ -93,3 +95,36 @@ jobs:
             build/rvvm_*
             !build/*/
           retention-days: 30
+
+  # Publishes the emulator binaries that passed the smoke boots above as a release, only for a pushed tag rvvm-* (a
+  # branch push never publishes). One asset per host, named rvvm-<host>[.exe], plus SHA256SUMS: consumers pin the hash of each file they
+  # use. Only the system emulator is released (rvvm_<arch>), not the user-mode one that is built beside it.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/rvvm-')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rvvm-*
+          path: built
+      - name: Name the assets and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          mkdir assets
+          for d in built/rvvm-*; do
+            host=${d#built/rvvm-}
+            f=$(ls "$d" | grep -E '^rvvm_(x86_64|arm64)(\.exe)?$' | head -n1)
+            test -n "$f" || { echo "::error::no rvvm_<arch> in $d"; exit 1; }
+            ext=""; case "$f" in *.exe) ext=.exe;; esac
+            cp "$d/$f" "assets/rvvm-$host$ext"
+          done
+          (cd assets && sha256sum -- * | tee SHA256SUMS)
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then echo "::error::release $tag already exists"; exit 1; fi
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --verify-tag --title "Headless rvvm $tag" \
+            --notes "Headless static builds (no X11, Wayland or SDL) of $GITHUB_SHA, built and smoke-booted (JIT and -nojit) by run $GITHUB_RUN_ID. Pin each file by its sha256 in SHA256SUMS." assets/*
