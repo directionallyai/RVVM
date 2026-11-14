@@ -28,7 +28,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <rvvm/rvvm_board.h>
 #include <rvvm/rvvm_pci.h>
 
+#include <util/rvtimer.h>
+#include <util/threading.h>
 #include <util/utils.h>
+
+#include <signal.h>
+#include <string.h>
 
 #include <core/gdbstub.h>
 #include <core/rvvm_isolation.h>
@@ -200,8 +205,7 @@ static void rvvm_print_help(void)
         "    -serial     ...  Add more serial ports (Via pty/pipe path), or null\n"
         "    -dtb        ...  Pass custom Device Tree Blob to the machine\n"
         "    -dumpdtb    ...  Dump auto-generated DTB to file\n"
-        "    -loadsnap   ...  Resume machine state from a snapshot file\n"
-        "    -savesnap   ...  Save machine state to a snapshot file on shutdown\n"
+        "    -snapshot   ...  Resume from <base>.state + <base>.ram if present, save them on shutdown\n"
         "    -v, -verbose     Enable verbose logging\n"
         "    -h, -help        Show this help message\n"
         "\n"
@@ -284,6 +288,29 @@ static bool rvvm_cli_configure(rvvm_machine_t* machine, const char* bios, tap_de
         }
     }
     return true;
+}
+
+// With -snapshot, SIGINT/SIGTERM halt the machine so the event loop returns and the snapshot is saved (a headless
+// build has no window to close). The handler only sets a flag; a watcher thread does the halting.
+static volatile sig_atomic_t snap_halt_req  = 0;
+static volatile sig_atomic_t snap_halt_stop = 0;
+
+static void snap_halt_signal(int sig)
+{
+    UNUSED(sig);
+    snap_halt_req = 1;
+}
+
+static void* snap_halt_watch(void* machine)
+{
+    while (!snap_halt_stop) {
+        if (snap_halt_req) {
+            rvvm_machine_halt((rvvm_machine_t*)machine);
+            break;
+        }
+        sleep_ms(20);
+    }
+    return NULL;
 }
 
 static int rvvm_cli_main(int argc, char** argv)
@@ -417,16 +444,31 @@ static int rvvm_cli_main(int argc, char** argv)
     }
 
     rvvm_blk_dev_t* snap_blk = NULL;
+    rvvm_blk_dev_t* snap_ram = NULL;
+    rvvm_thread_t*  snap_watch = NULL;
     if (rvvm_getarg("snapshot")) {
-        // Open snapshot image, load & wipe it
-        snap_blk = rvvm_blk_open(rvvm_getarg("snapshot"), NULL, RVVM_BLK_RW | RVVM_BLK_CREAT | RVVM_BLK_GROW);
-        if (!rvvm_machine_snapshot(machine, snap_blk, false)) {
+        // `-snapshot base` keeps the machine state in base.state and the raw guest RAM in base.ram
+        const char* base = rvvm_getarg("snapshot");
+        size_t      len  = rvvm_strlen(base);
+        char*       name = safe_calloc(len + 8, 1);
+        memcpy(name, base, len);
+        memcpy(name + len, ".state", 7);
+        snap_blk = rvvm_blk_open(name, NULL, RVVM_BLK_RW | RVVM_BLK_CREAT | RVVM_BLK_GROW);
+        memcpy(name + len, ".ram", 5);
+        snap_ram = rvvm_blk_open(name, NULL, RVVM_BLK_RW | RVVM_BLK_CREAT | RVVM_BLK_GROW);
+        free(name);
+        // Load it; the state is wiped afterwards (one resume per save), the RAM image is left as it is
+        if (!snap_blk || !snap_ram || !rvvm_machine_snapshot_split(machine, snap_blk, snap_ram, false)) {
             rvvm_error("Failed to load machine snapshot");
             rvvm_blk_close(snap_blk);
+            rvvm_blk_close(snap_ram);
             rvvm_free_machine(machine);
             return -1;
         }
         rvvm_blk_set_size(snap_blk, 0);
+        signal(SIGINT, snap_halt_signal);
+        signal(SIGTERM, snap_halt_signal);
+        snap_watch = thread_create(snap_halt_watch, machine);
     }
 
     if (!rvvm_has_arg("noisolation")) {
@@ -439,10 +481,16 @@ static int rvvm_cli_main(int argc, char** argv)
     // Returns on machine pause
     rvvm_run_eventloop();
 
-    if (snap_blk && !rvvm_machine_snapshot(machine, snap_blk, true)) {
+    if (snap_watch) {
+        snap_halt_stop = 1;
+        thread_join(snap_watch);
+    }
+
+    if (snap_blk && !rvvm_machine_snapshot_split(machine, snap_blk, snap_ram, true)) {
         rvvm_error("Failed to save machine snapshot");
     }
     rvvm_blk_close(snap_blk);
+    rvvm_blk_close(snap_ram);
 
     rvvm_free_machine(machine);
     return 0;

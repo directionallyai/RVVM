@@ -154,6 +154,13 @@ RVVM_PUBLIC bool rvvm_machine_powered(rvvm_machine_t* machine);
 RVVM_PUBLIC bool rvvm_machine_snapshot(rvvm_machine_t* machine, rvvm_blk_dev_t* blk, bool out);
 
 /**
+ * Snapshot machine into two images: `state` (machine, harts, devices) and `ram` (the raw guest RAM, byte for byte
+ * from offset 0, so it can be mapped or shared on its own). Loading needs a `ram` exactly as big as the machine's RAM.
+ * Saving rewrites `ram` in place; loading leaves it untouched.
+ */
+RVVM_PUBLIC bool rvvm_machine_snapshot_split(rvvm_machine_t* machine, rvvm_blk_dev_t* state, rvvm_blk_dev_t* ram, bool out);
+
+/**
  * Full machine state cleanup (Frees memory, attached devices, internal structures)
  *
  * \warning After this call, none of the handles previously attached to this machine are valid

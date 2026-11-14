@@ -868,8 +868,9 @@ static void rvvm_snapshot_hart(rvvm_snapshot_t* snap, rvvm_hart_t* vm)
     }
 }
 
-RVVM_PUBLIC bool rvvm_machine_snapshot(rvvm_machine_t* machine, rvvm_blk_dev_t* blk, bool out)
+static bool rvvm_machine_snapshot_impl(rvvm_machine_t* machine, rvvm_blk_dev_t* blk, rvvm_blk_dev_t* ram, bool out)
 {
+    bool ram_ok = true;
     if (machine && blk && !rvvm_machine_running(machine)) {
         uint64_t msize = machine->mem.size;
         uint64_t harts = vector_size(machine->harts);
@@ -884,6 +885,9 @@ RVVM_PUBLIC bool rvvm_machine_snapshot(rvvm_machine_t* machine, rvvm_blk_dev_t* 
         if (out && !rvvm_machine_powered(machine)) {
             // Empty the snapshot on powered down machine
             rvvm_blk_set_size(blk, 0);
+            if (ram) {
+                rvvm_blk_set_size(ram, 0);
+            }
             return true;
         }
 
@@ -904,8 +908,23 @@ RVVM_PUBLIC bool rvvm_machine_snapshot(rvvm_machine_t* machine, rvvm_blk_dev_t* 
             return false;
         }
 
-        rvvm_snapshot_section(snap, "rvvm-ram");
-        rvvm_snapshot_data(snap, machine->mem.data, machine->mem.size);
+        if (ram) {
+            // RAM lives in its own image, raw from offset 0; the state only records that it does
+            rvvm_snapshot_section(snap, "rvvm-ram-file");
+            if (out) {
+                ram_ok = rvvm_blk_set_size(ram, 0) && rvvm_blk_write(ram, machine->mem.data, machine->mem.size, 0) == machine->mem.size;
+            } else {
+                ram_ok = rvvm_blk_get_size(ram) == machine->mem.size
+                      && rvvm_blk_read(ram, machine->mem.data, machine->mem.size, 0) == machine->mem.size;
+            }
+            if (!ram_ok) {
+                rvvm_snapshot_close(snap);
+                return false;
+            }
+        } else {
+            rvvm_snapshot_section(snap, "rvvm-ram");
+            rvvm_snapshot_data(snap, machine->mem.data, machine->mem.size);
+        }
 
         vector_foreach (machine->harts, i) {
             rvvm_snapshot_hart(snap, vector_at(machine->harts, i));
@@ -926,6 +945,16 @@ RVVM_PUBLIC bool rvvm_machine_snapshot(rvvm_machine_t* machine, rvvm_blk_dev_t* 
         return rvvm_snapshot_close(snap);
     }
     return false;
+}
+
+RVVM_PUBLIC bool rvvm_machine_snapshot(rvvm_machine_t* machine, rvvm_blk_dev_t* blk, bool out)
+{
+    return rvvm_machine_snapshot_impl(machine, blk, NULL, out);
+}
+
+RVVM_PUBLIC bool rvvm_machine_snapshot_split(rvvm_machine_t* machine, rvvm_blk_dev_t* state, rvvm_blk_dev_t* ram, bool out)
+{
+    return ram && rvvm_machine_snapshot_impl(machine, state, ram, out);
 }
 
 PUBLIC void rvvm_free_machine(rvvm_machine_t* machine)
