@@ -14,7 +14,7 @@ Exit status 0 only if every check passed."""
 import hashlib, os, re, shutil, subprocess, sys, tempfile, threading, time
 
 rvvm, guest, extra = sys.argv[1], sys.argv[2], sys.argv[3:]
-MEM_MB = 256
+MEM_MB = int(os.environ.get("SNAP_MEM_MB", "256"))  # SNAP_MEM_MB=1536 for the size of the real guest
 FW, IMAGE = os.path.join(guest, "fw_jump.bin"), os.path.join(guest, "Image-tick")
 WORK = tempfile.mkdtemp(prefix="rvvm-snap-")
 BASE = os.path.join(WORK, "s")
@@ -37,6 +37,8 @@ class VM:
         self.out = bytearray()
         self.ticks = []
         self.t0 = time.time()
+        self.first_tick = None  # seconds from process start to the first RVVM-TICK
+        self.stop_secs = None  # seconds from the console stop request to exit
         vms.append(self)
         threading.Thread(target=self._read, daemon=True).start()
 
@@ -49,6 +51,8 @@ class VM:
             for line in lines:
                 m = re.search(rb"RVVM-TICK (\d+)", line)
                 if m:
+                    if self.first_tick is None:
+                        self.first_tick = time.time() - self.t0
                     self.ticks.append(int(m.group(1)))
 
     def wait_ticks(self, n, timeout=LIMIT):
@@ -62,13 +66,16 @@ class VM:
 
     def stop(self):
         """Ctrl+A x on the console: the machine halts and, with -snapshot, is saved. Returns the exit status or None."""
+        t = time.time()
         try:
             self.p.stdin.write(b"\x01x")
             self.p.stdin.flush()
         except OSError:
             pass
         try:
-            return self.p.wait(timeout=LIMIT)
+            rc = self.p.wait(timeout=LIMIT)
+            self.stop_secs = time.time() - t
+            return rc
         except subprocess.TimeoutExpired:
             return None
 
@@ -171,7 +178,7 @@ try:
     f.kill()
 
     # 6. different RAM size: must fail, not hang or crash
-    g = VM("-snapload", mem=MEM_MB * 2)
+    g = VM("-snapload", mem=MEM_MB * 2 if MEM_MB <= 512 else MEM_MB // 2)
     try:
         rc = g.p.wait(timeout=LIMIT)
     except subprocess.TimeoutExpired:
@@ -184,6 +191,18 @@ finally:
         v.kill()
     shutil.rmtree(WORK, ignore_errors=True)
 
+def fmt(x):
+    return "n/a" if x is None else "%.2f s" % x
+
+
+try:
+    resumes = [v.first_tick for v in (b, c, d, e, f) if v.first_tick is not None]
+    print("\ntiming (%d MB guest, %s): cold boot -> first tick %s | resume -> first tick %s (median of %d; the ticker prints "
+          "every 200 ms, so +-0.2 s) | save over a fresh image %s | save over a mapped image %s" % (
+              MEM_MB, os.path.basename(rvvm), fmt(a.first_tick),
+              fmt(sorted(resumes)[len(resumes) // 2]) if resumes else "n/a", len(resumes), fmt(a.stop_secs), fmt(e.stop_secs)), flush=True)
+except NameError:
+    pass
 print("\n%d check(s) failed" % len(failures) if failures else "\nall snapshot checks passed")
 for f_ in failures:
     print(" -", f_)

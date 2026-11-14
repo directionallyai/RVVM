@@ -93,6 +93,10 @@ jobs:
         run: python3 ci/snapshot_test.py "build/$(ls build | grep -E '^rvvm_(x86_64|arm64)(\.exe)?$' | head -1)" smoke-guest
       - name: Snapshot tests (-nojit)
         run: python3 ci/snapshot_test.py "build/$(ls build | grep -E '^rvvm_(x86_64|arm64)(\.exe)?$' | head -1)" smoke-guest -nojit
+      - name: Snapshot timing (1536 MB guest, like the local VM)
+        env:
+          SNAP_MEM_MB: 1536
+        run: python3 ci/snapshot_test.py "build/$(ls build | grep -E '^rvvm_(x86_64|arm64)(\.exe)?$' | head -1)" smoke-guest
       - uses: actions/upload-artifact@v4
         with:
           name: rvvm-${{ matrix.name }}
