@@ -183,6 +183,15 @@ static size_t term_read_raw(chardev_term_t* term, char* buffer, size_t size)
     return 0;
 #elif defined(WIN32_TERM_IMPL)
     HANDLE console = GetStdHandle(STD_INPUT_HANDLE);
+    if (size && console && console != INVALID_HANDLE_VALUE && GetFileType(console) == FILE_TYPE_PIPE) {
+        // Input is a pipe (a script driving the console): read whatever is there without blocking
+        DWORD avail = 0, got = 0;
+        if (PeekNamedPipe(console, NULL, 0, NULL, &avail, NULL) && avail
+            && ReadFile(console, buffer, avail < size ? avail : (DWORD)size, &got, NULL)) {
+            return got;
+        }
+        return 0;
+    }
     if (size && console && console != INVALID_HANDLE_VALUE) {
         size_t ret    = 0;
         DWORD  events = 0;
