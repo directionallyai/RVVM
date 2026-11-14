@@ -497,8 +497,10 @@ void* vma_mmap(void* addr, size_t size, uint32_t flags, rvfile_t* file, uint64_t
             // Misaligned address / offset passed with VMA_FIXED
             return NULL;
         } else {
-            // Fixup file offset misalign
-            addr      = NULL;
+            // Fixup file offset misalign; a fixed mapping keeps the address it was asked for
+            if (!(flags & VMA_FIXED)) {
+                addr = NULL;
+            }
             offset   -= off_diff;
             ptr_diff  = off_diff;
         }

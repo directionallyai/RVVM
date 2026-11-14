@@ -294,6 +294,7 @@ struct randomize_layout rvvm_machine_t {
     rvtimer_t                  timer;
 
     uint32_t running;
+    bool     ram_mapped; // RAM is a private mapping of a RAM image, see rvvm_machine_map_ram()
     uint32_t power_state;
     bool     rv64;
 

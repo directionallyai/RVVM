@@ -15,6 +15,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include <rvvm/rvvm_blk.h>
 #include <rvvm/rvvm_snapshot.h>
 
+#include <util/blk_io.h>
 #include <util/elf_load.h>
 #include <util/mem_ops.h>
 #include <util/spinlock.h>
@@ -22,6 +23,7 @@ file, You can obtain one at https://mozilla.org/MPL/2.0/.
 #include <util/threading.h>
 #include <util/utils.h>
 #include <util/vector.h>
+#include <util/vma_ops.h>
 
 #include <core/rvvm_isolation.h>
 
@@ -912,10 +914,15 @@ static bool rvvm_machine_snapshot_impl(rvvm_machine_t* machine, rvvm_blk_dev_t* 
             // RAM lives in its own image, raw from offset 0; the state only records that it does
             rvvm_snapshot_section(snap, "rvvm-ram-file");
             if (out) {
-                ram_ok = rvvm_blk_set_size(ram, 0) && rvvm_blk_write(ram, machine->mem.data, machine->mem.size, 0) == machine->mem.size;
+                // A mapped image is overwritten in place: truncating it would pull the pages the guest has not touched
+                // out from under the mapping
+                ram_ok = (machine->ram_mapped || rvvm_blk_set_size(ram, 0))
+                      && rvvm_blk_write(ram, machine->mem.data, machine->mem.size, 0) == machine->mem.size;
             } else {
+                // A mapped RAM image is already the guest's memory, there is nothing to read
                 ram_ok = rvvm_blk_get_size(ram) == machine->mem.size
-                      && rvvm_blk_read(ram, machine->mem.data, machine->mem.size, 0) == machine->mem.size;
+                      && (machine->ram_mapped
+                          || rvvm_blk_read(ram, machine->mem.data, machine->mem.size, 0) == machine->mem.size);
             }
             if (!ram_ok) {
                 rvvm_snapshot_close(snap);
@@ -945,6 +952,45 @@ static bool rvvm_machine_snapshot_impl(rvvm_machine_t* machine, rvvm_blk_dev_t* 
         return rvvm_snapshot_close(snap);
     }
     return false;
+}
+
+RVVM_PUBLIC bool rvvm_machine_map_ram(rvvm_machine_t* machine, const char* path)
+{
+#if defined(HOST_TARGET_POSIX)
+    if (!machine || !path || rvvm_machine_running(machine) || machine->ram_mapped) {
+        return false;
+    }
+    rvfile_t* file = rvopen(path, RVFILE_READ);
+    if (!file) {
+        return false;
+    }
+    void*  addr = machine->mem.data;
+    size_t size = machine->mem.size;
+    bool   ok   = false;
+    if (rvfilesize(file) == size) {
+        // Replace the anonymous RAM in place. The address stays, so the harts, the JIT and the devices keep their pointers
+        vma_free(addr, size);
+        void* map = vma_mmap(addr, size, VMA_RDWR | VMA_FIXED, file, 0);
+        if (map == addr) {
+            ok = true;
+        } else {
+            if (map) {
+                vma_free(map, size);
+            }
+            // Put anonymous RAM back where it was so the caller can read the image instead
+            if (vma_alloc(addr, size, VMA_RDWR | VMA_FIXED) != addr) {
+                rvvm_error("Failed to restore anonymous RAM after a failed RAM image mapping");
+            }
+        }
+    }
+    rvclose(file);
+    machine->ram_mapped = ok;
+    return ok;
+#else
+    UNUSED(machine);
+    UNUSED(path);
+    return false;
+#endif
 }
 
 RVVM_PUBLIC bool rvvm_machine_snapshot(rvvm_machine_t* machine, rvvm_blk_dev_t* blk, bool out)

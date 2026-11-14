@@ -206,6 +206,7 @@ static void rvvm_print_help(void)
         "    -dtb        ...  Pass custom Device Tree Blob to the machine\n"
         "    -dumpdtb    ...  Dump auto-generated DTB to file\n"
         "    -snapshot   ...  Resume from <base>.state + <base>.ram if present, save them on shutdown\n"
+        "    -snapload   ...  Resume from <base>.state + <base>.ram read-only, RAM mapped copy-on-write, never save\n"
         "    -v, -verbose     Enable verbose logging\n"
         "    -h, -help        Show this help message\n"
         "\n"
@@ -443,21 +444,34 @@ static int rvvm_cli_main(int argc, char** argv)
         rvvm_dump_fdt(machine, rvvm_getarg("dumpdtb"));
     }
 
+    // -snapshot base: resume from base.state + base.ram if present (the state is consumed), save them again on shutdown.
+    // -snapload base: resume from them read-only: the state stays, RAM is mapped copy-on-write and nothing is saved, so
+    // one saved machine can start any number of copies.
+    const char*     snap_base = rvvm_getarg("snapshot") ? rvvm_getarg("snapshot") : rvvm_getarg("snapload");
+    bool            snap_load = !rvvm_getarg("snapshot") && rvvm_getarg("snapload");
+    char*           snap_state_path = NULL;
+    char*           snap_ram_path   = NULL;
     rvvm_blk_dev_t* snap_blk = NULL;
     rvvm_blk_dev_t* snap_ram = NULL;
     rvvm_thread_t*  snap_watch = NULL;
-    if (rvvm_getarg("snapshot")) {
-        // `-snapshot base` keeps the machine state in base.state and the raw guest RAM in base.ram
-        const char* base = rvvm_getarg("snapshot");
-        size_t      len  = rvvm_strlen(base);
-        char*       name = safe_calloc(len + 8, 1);
-        memcpy(name, base, len);
-        memcpy(name + len, ".state", 7);
-        snap_blk = rvvm_blk_open(name, NULL, RVVM_BLK_RW | RVVM_BLK_CREAT | RVVM_BLK_GROW);
-        memcpy(name + len, ".ram", 5);
-        snap_ram = rvvm_blk_open(name, NULL, RVVM_BLK_RW | RVVM_BLK_CREAT | RVVM_BLK_GROW);
-        free(name);
-        // Load it; the state is wiped afterwards (one resume per save), the RAM image is left as it is
+    if (snap_base) {
+        size_t len      = rvvm_strlen(snap_base);
+        snap_state_path = safe_calloc(len + 8, 1);
+        snap_ram_path   = safe_calloc(len + 8, 1);
+        memcpy(snap_state_path, snap_base, len);
+        memcpy(snap_state_path + len, ".state", 7);
+        memcpy(snap_ram_path, snap_base, len);
+        memcpy(snap_ram_path + len, ".ram", 5);
+
+        uint32_t blk_opts = snap_load ? RVVM_BLK_READ : (RVVM_BLK_RW | RVVM_BLK_CREAT | RVVM_BLK_GROW);
+        snap_blk = rvvm_blk_open(snap_state_path, NULL, blk_opts);
+        snap_ram = rvvm_blk_open(snap_ram_path, NULL, blk_opts);
+        // Map the RAM image instead of reading it, where the host can; otherwise the load below reads it
+        if (rvvm_blk_get_size(snap_blk)) {
+            if (!rvvm_machine_map_ram(machine, snap_ram_path)) {
+                rvvm_info("RAM image not mapped, reading it");
+            }
+        }
         if (!snap_blk || !snap_ram || !rvvm_machine_snapshot_split(machine, snap_blk, snap_ram, false)) {
             rvvm_error("Failed to load machine snapshot");
             rvvm_blk_close(snap_blk);
@@ -465,10 +479,16 @@ static int rvvm_cli_main(int argc, char** argv)
             rvvm_free_machine(machine);
             return -1;
         }
-        rvvm_blk_set_size(snap_blk, 0);
-        signal(SIGINT, snap_halt_signal);
-        signal(SIGTERM, snap_halt_signal);
-        snap_watch = thread_create(snap_halt_watch, machine);
+        if (snap_load) {
+            rvvm_blk_close(snap_blk);
+            rvvm_blk_close(snap_ram);
+            snap_blk = snap_ram = NULL;
+        } else {
+            rvvm_blk_set_size(snap_blk, 0);
+            signal(SIGINT, snap_halt_signal);
+            signal(SIGTERM, snap_halt_signal);
+            snap_watch = thread_create(snap_halt_watch, machine);
+        }
     }
 
     if (!rvvm_has_arg("noisolation")) {
@@ -486,11 +506,18 @@ static int rvvm_cli_main(int argc, char** argv)
         thread_join(snap_watch);
     }
 
-    if (snap_blk && !rvvm_machine_snapshot_split(machine, snap_blk, snap_ram, true)) {
-        rvvm_error("Failed to save machine snapshot");
+    if (snap_blk) {
+        // The machine is stopped, so the filesystem is off limits by now (the seccomp filter): both images were opened
+        // before. A mapped RAM image is rewritten in place and never truncated: its untouched pages are the file itself
+        bool saved = snap_ram && rvvm_machine_snapshot_split(machine, snap_blk, snap_ram, true);
+        rvvm_blk_close(snap_blk);
+        rvvm_blk_close(snap_ram);
+        if (!saved) {
+            rvvm_error("Failed to save machine snapshot");
+        }
     }
-    rvvm_blk_close(snap_blk);
-    rvvm_blk_close(snap_ram);
+    free(snap_state_path);
+    free(snap_ram_path);
 
     rvvm_free_machine(machine);
     return 0;

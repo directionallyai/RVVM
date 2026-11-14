@@ -161,6 +161,15 @@ RVVM_PUBLIC bool rvvm_machine_snapshot(rvvm_machine_t* machine, rvvm_blk_dev_t* 
 RVVM_PUBLIC bool rvvm_machine_snapshot_split(rvvm_machine_t* machine, rvvm_blk_dev_t* state, rvvm_blk_dev_t* ram, bool out);
 
 /**
+ * Back the guest RAM with a RAM image (as written by rvvm_machine_snapshot_split()) by mapping it copy-on-write instead of
+ * reading it: only the pages the guest touches are read, its writes stay private and the image is never modified, so many
+ * machines can share one. Call it before loading the snapshot; the load then skips reading the RAM.
+ *
+ * \return false if the host cannot map files (the caller reads the image instead) or the image is not exactly as big as RAM
+ */
+RVVM_PUBLIC bool rvvm_machine_map_ram(rvvm_machine_t* machine, const char* path);
+
+/**
  * Full machine state cleanup (Frees memory, attached devices, internal structures)
  *
  * \warning After this call, none of the handles previously attached to this machine are valid
