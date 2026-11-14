@@ -734,8 +734,8 @@ bool rvtruncate(rvfile_t* file, uint64_t length)
         scoped_spin_lock_slow (&file->lock) {
             // Perform SetFilePointer() + SetEndOfFile() under writer lock
             // to prevent ReadFile()/WriteFile() from moving file pointer
-            if (rvfile_win32_lseek(file->handle, length, FILE_BEGIN)) {
-                // Successfully set file pointer, set end of file here
+            if (rvfile_win32_lseek(file->handle, length, FILE_BEGIN) != -1) {
+                // Successfully set file pointer (it returns the new position, 0 included), set end of file here
                 resized = !!SetEndOfFile(file->handle);
             }
         }
