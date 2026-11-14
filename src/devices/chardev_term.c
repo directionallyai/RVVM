@@ -354,16 +354,28 @@ static uint32_t term_update_flags(chardev_term_t* term)
     return flags & ~flags_orig;
 }
 
+static void (*term_exit_hook)(void) = NULL;
+
+PUBLIC void chardev_term_set_exit_hook(void (*hook)(void))
+{
+    term_exit_hook = hook;
+}
+
 // Handles VM-related hotkeys
 static void term_process_input(chardev_term_t* term, char* buffer, size_t size)
 {
     for (size_t i = 0; i < size; ++i) {
         if (term->ctrl_a) {
             if (buffer[i] == 'x') {
-                // Exit on Ctrl+A, x
-                spin_unlock(&term->lock);
-                term_orig_mode();
-                exit(0);
+                if (term_exit_hook) {
+                    // Let the machine stop on its own (and be snapshotted)
+                    term_exit_hook();
+                } else {
+                    // Exit on Ctrl+A, x
+                    spin_unlock(&term->lock);
+                    term_orig_mode();
+                    exit(0);
+                }
             }
         }
 

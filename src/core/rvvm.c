@@ -956,7 +956,7 @@ static bool rvvm_machine_snapshot_impl(rvvm_machine_t* machine, rvvm_blk_dev_t* 
 
 RVVM_PUBLIC bool rvvm_machine_map_ram(rvvm_machine_t* machine, const char* path)
 {
-#if defined(HOST_TARGET_POSIX)
+#if defined(HOST_TARGET_POSIX) || defined(HOST_TARGET_WINNT)
     if (!machine || !path || rvvm_machine_running(machine) || machine->ram_mapped) {
         return false;
     }

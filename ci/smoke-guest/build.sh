@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds the CI smoke guest for RVVM: OpenSBI (fw_jump.bin) and a tiny Linux Image with an embedded initramfs whose only
 # program is init.c. Needs a Debian/Ubuntu host with gcc-riscv64-linux-gnu and libc6-dev-riscv64-cross.
-# usage: build.sh OUTDIR   (writes OUTDIR/fw_jump.bin, OUTDIR/Image, OUTDIR/expected.txt)
+# usage: build.sh OUTDIR   (writes OUTDIR/fw_jump.bin, OUTDIR/Image, OUTDIR/Image-tick, OUTDIR/expected.txt)
 set -eu
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="$(mkdir -p "${1:?usage: build.sh OUTDIR}" && cd "$1" && pwd)"
@@ -26,6 +26,14 @@ scripts/config --enable 64BIT --enable MMU --enable PRINTK --enable TTY --enable
 make -s ARCH=riscv CROSS_COMPILE=$CROSS olddefconfig
 make -s ARCH=riscv CROSS_COMPILE=$CROSS -j"$(nproc)" Image
 cp arch/riscv/boot/Image "$OUT/Image"
+# A second Image whose init is the ticker (ci/snapshot_test.py): only the embedded initramfs differs, so this relinks quickly
+cd "$WORK"
+${CROSS}gcc -O2 -static -o tick "$HERE/tick.c"
+printf 'dir /dev 0755 0 0\nnod /dev/console 0600 0 0 c 5 1\ndir /proc 0755 0 0\nfile /init %s/tick 0755 0 0\n' "$WORK" > initramfs-tick.list
+cd $KERNEL
+scripts/config --set-str INITRAMFS_SOURCE "$WORK/initramfs-tick.list"
+make -s ARCH=riscv CROSS_COMPILE=$CROSS -j"$(nproc)" Image
+cp arch/riscv/boot/Image "$OUT/Image-tick"
 cd "$WORK"
 [ -d opensbi ] || git clone -q --depth 1 --branch $OPENSBI_TAG https://github.com/riscv-software-src/opensbi opensbi
 make -s -C opensbi -j"$(nproc)" CROSS_COMPILE=$CROSS PLATFORM=generic

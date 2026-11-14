@@ -291,7 +291,7 @@ static bool rvvm_cli_configure(rvvm_machine_t* machine, const char* bios, tap_de
     return true;
 }
 
-// With -snapshot, SIGINT/SIGTERM halt the machine so the event loop returns and the snapshot is saved (a headless
+// With -snapshot, SIGINT/SIGTERM and Ctrl+A, x on the console halt the machine so the event loop returns and the snapshot is saved (a headless
 // build has no window to close). The handler only sets a flag; a watcher thread does the halting.
 static volatile sig_atomic_t snap_halt_req  = 0;
 static volatile sig_atomic_t snap_halt_stop = 0;
@@ -299,6 +299,11 @@ static volatile sig_atomic_t snap_halt_stop = 0;
 static void snap_halt_signal(int sig)
 {
     UNUSED(sig);
+    snap_halt_req = 1;
+}
+
+static void snap_halt_hotkey(void)
+{
     snap_halt_req = 1;
 }
 
@@ -487,6 +492,7 @@ static int rvvm_cli_main(int argc, char** argv)
             rvvm_blk_set_size(snap_blk, 0);
             signal(SIGINT, snap_halt_signal);
             signal(SIGTERM, snap_halt_signal);
+            chardev_term_set_exit_hook(snap_halt_hotkey);
             snap_watch = thread_create(snap_halt_watch, machine);
         }
     }

@@ -88,6 +88,8 @@ static inline void chardev_notify(chardev_t* dev, uint32_t flags)
 // Built-in chardev implementations
 
 PUBLIC chardev_t* chardev_term_create(void); // stdio
+// Ctrl+A, x on the terminal calls this instead of exiting the process, when set (so the machine can stop and be snapshotted)
+PUBLIC void chardev_term_set_exit_hook(void (*hook)(void));
 PUBLIC chardev_t* chardev_fd_create(int rfd, int wfd); // POSIX fd
 PUBLIC chardev_t* chardev_pty_create(const char* path); // POSIX pipe/pty
 
