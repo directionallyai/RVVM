@@ -916,8 +916,14 @@ static bool rvvm_machine_snapshot_impl(rvvm_machine_t* machine, rvvm_blk_dev_t* 
             if (out) {
                 // A mapped image is overwritten in place: truncating it would pull the pages the guest has not touched
                 // out from under the mapping
-                ram_ok = (machine->ram_mapped || rvvm_blk_set_size(ram, 0))
-                      && rvvm_blk_write(ram, machine->mem.data, machine->mem.size, 0) == machine->mem.size;
+                size_t wrote = 0;
+                ram_ok       = machine->ram_mapped || rvvm_blk_set_size(ram, 0);
+                if (ram_ok) {
+                    wrote  = rvvm_blk_write(ram, machine->mem.data, machine->mem.size, 0);
+                    ram_ok = wrote == machine->mem.size;
+                }
+                rvvm_info("Snapshot: wrote %llu of %llu bytes of RAM%s", (unsigned long long)wrote,
+                          (unsigned long long)machine->mem.size, machine->ram_mapped ? " over the mapped image" : "");
             } else {
                 // A mapped RAM image is already the guest's memory, there is nothing to read
                 ram_ok = rvvm_blk_get_size(ram) == machine->mem.size

@@ -159,7 +159,11 @@ try:
     check(last4 > last1 + 3, "4. ran on (tick %d -> %d)" % (last1, last4))
     check(size(STATE) > 0, "4. state saved again (%d bytes)" % size(STATE))
     check(size(RAM) == MEM_MB << 20, "4. RAM image still exactly RAM (%d bytes)" % size(RAM))
-    check(sha(RAM) != ram1, "4. RAM image was rewritten with the new state")
+    ram4 = sha(RAM)
+    if ram4 == ram1:
+        print("   diagnostics: image sha %s before and after, size %d, state %d" % (ram1[:12], size(RAM), size(STATE)), flush=True)
+        print("   rvvm output mentioning the snapshot:", [l for l in e.text().splitlines() if re.search("napshot|RAM|map", l)][:12], flush=True)
+    check(ram4 != ram1, "4. RAM image was rewritten with the new state")
 
     # 5. the new snapshot continues from step 4
     f = VM("-snapload")
