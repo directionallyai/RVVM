@@ -577,6 +577,15 @@ static void rtl8169_suspend(rvvm_reg_dev_t* dev, rvvm_snapshot_t* snap, bool res
         rvvm_snapshot_field(snap, rtl8169->isr);
         rvvm_snapshot_field(snap, rtl8169->phydr);
         rvvm_snapshot_field(snap, rtl8169->phyar);
+
+        // The MAC lives in the host tap (random per process): carry it over, or the resumed guest keeps the MAC it
+        // learned while the new tap answers to another one and no frame reaches it
+        uint8_t mac[6] = {0};
+        tap_get_mac(rtl8169->tap, mac);
+        rvvm_snapshot_data(snap, mac, sizeof(mac));
+        if (resume) {
+            tap_set_mac(rtl8169->tap, mac);
+        }
         rtl8169_update_irqs(rtl8169);
 
         // Snapshot rings
@@ -590,7 +599,6 @@ static void rtl8169_suspend(rvvm_reg_dev_t* dev, rvvm_snapshot_t* snap, bool res
         // Resume
         atomic_swap_uint32(&rtl8169->cr, cr);
     }
-    UNUSED(resume);
 }
 
 static void rtl8169_pci_read(rvvm_reg_dev_t* dev, void* data, size_t size, size_t off)
